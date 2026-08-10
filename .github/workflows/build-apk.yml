@@ -42,9 +42,9 @@ jobs:
           python3 scripts/configure_build.py
       - name: Build installable APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
-      - name: Upload APK to cPanel
+            - name: Upload APK to cPanel
         run: |
-          curl --fail --silent --show-error -X POST -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" -F "build_id=$BUILD_ID" -F "status=ready" -F "apk=@app/build/outputs/apk/debug/app-debug.apk;type=application/vnd.android.package-archive" "${{ secrets.CPANEL_BASE_URL }}/api/build-update.php"
+          curl --fail-with-body --show-error -X POST -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" -F "build_id=$BUILD_ID" -F "status=ready" -F "apk=@app/build/outputs/apk/debug/app-debug.apk;type=application/vnd.android.package-archive" "${{ secrets.CPANEL_BASE_URL }}/api/build-update.php"
       - name: Notify failure
         if: failure()
         run: |
