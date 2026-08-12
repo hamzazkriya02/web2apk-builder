@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     env:
       BUILD_ID: ${{ github.event.client_payload.build_id }}
@@ -23,6 +23,7 @@ jobs:
       APP_KEY: ${{ github.event.client_payload.app_key }}
       APPLICATION_ID: ${{ github.event.client_payload.application_id }}
       LOGO_URL: ${{ github.event.client_payload.logo_url }}
+      CALLBACK_URL: ${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-callback.php
 
     steps:
       - name: Checkout repository
@@ -39,32 +40,35 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Show build information
-        run: |
-          echo "Build ID: $BUILD_ID"
-          echo "App Name: $APP_NAME"
-          echo "App Key: $APP_KEY"
-          echo "Application ID: $APPLICATION_ID"
+      - name: Install image processor
+        run: python3 -m pip install --disable-pip-version-check --quiet pillow==11.3.0
 
-      - name: Notify cPanel - Building
+      - name: Notify building
         run: |
           curl --fail-with-body --show-error \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" \
             -F "build_id=$BUILD_ID" \
             -F "status=building" \
-            -F "build_type=probrowser" \
             -F "message=Creating ProBrowser Android APK..." \
-            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php"
+            "$CALLBACK_URL"
 
       - name: Configure ProBrowser
-        run: |
-          python3 probrowser/scripts/configure_probrowser.py
+        run: python3 probrowser/scripts/configure_probrowser.py
 
-      - name: Build ProBrowser APK
+      - name: Build installable APK
         working-directory: probrowser
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Notify uploading
         run: |
-          gradle :app:assembleDebug --no-daemon --stacktrace
+          curl --fail-with-body --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" \
+            -F "build_id=$BUILD_ID" \
+            -F "status=uploading" \
+            -F "message=Uploading APK to cPanel..." \
+            "$CALLBACK_URL"
 
       - name: Upload APK to cPanel
         run: |
@@ -73,11 +77,11 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" \
             -F "build_id=$BUILD_ID" \
             -F "status=ready" \
-            -F "build_type=probrowser" \
+            -F "message=APK ready." \
             -F "apk=@probrowser/app/build/outputs/apk/debug/app-debug.apk;type=application/vnd.android.package-archive" \
-            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php"
+            "$CALLBACK_URL"
 
-      - name: Notify cPanel - Failed
+      - name: Notify failure
         if: failure()
         run: |
           curl --show-error \
@@ -85,6 +89,5 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.CPANEL_CALLBACK_TOKEN }}" \
             -F "build_id=$BUILD_ID" \
             -F "status=failed" \
-            -F "build_type=probrowser" \
-            -F "message=ProBrowser Android build failed." \
-            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php" || true
+            -F "message=Android build failed. Open GitHub Actions for the error log." \
+            "$CALLBACK_URL" || true

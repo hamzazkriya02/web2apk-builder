@@ -64,6 +64,7 @@ public class MainActivity extends AppCompatActivity
     private AlertDialog popupDialog;
     private String scheduledPopupId = "";
     private String shownPopupId = "";
+    private int proxyRetryCount = 0;
 
     private final Runnable reloadRunnable = new Runnable() {
         @Override
@@ -106,12 +107,13 @@ public class MainActivity extends AppCompatActivity
 
 
         refreshButton.setOnClickListener(v -> {
+            proxyRetryCount = 0;
             loadedUrl = "";
             webView.stopLoading();
             errorPanel.setVisibility(View.GONE);
             webView.setVisibility(View.VISIBLE);
             progressBar.setVisibility(View.VISIBLE);
-            loadWebsite(true);
+            applySavedProxyThenLoad();
         });
 
         findViewById(R.id.retryButton).setOnClickListener(
@@ -293,6 +295,7 @@ public class MainActivity extends AppCompatActivity
                             WebView view,
                             String url
                     ) {
+                        proxyRetryCount = 0;
                         progressBar.setVisibility(View.GONE);
                         CookieManager.getInstance().flush();
                     }
@@ -312,15 +315,16 @@ public class MainActivity extends AppCompatActivity
                             WebResourceError error
                     ) {
                         if (request.isForMainFrame()) {
-                            String description =
-                                    String.valueOf(
-                                            error.getDescription()
-                                    );
+                            String description = String.valueOf(error.getDescription());
+                            boolean proxyEnabled = preferences.getBoolean("proxy_enabled", false);
 
-                            showError(
-                                    "Website could not be loaded.\n"
-                                            + description
-                            );
+                            if (browserConfig.proxy_feature_enabled && proxyEnabled && proxyRetryCount < 1) {
+                                proxyRetryCount++;
+                                reloadHandler.postDelayed(() -> applySavedProxyThenLoad(), 700);
+                                return;
+                            }
+
+                            showError("Website could not be loaded.\n" + description);
                         }
                     }
                 }
@@ -344,17 +348,35 @@ public class MainActivity extends AppCompatActivity
     }
     @Override
     public void onConfigChanged(BrowserConfig config) {
-        browserConfig = config == null
-                ? new BrowserConfig()
-                : config;
+        browserConfig = config == null ? new BrowserConfig() : config;
 
-        headerTitle.setText(
-                nonEmpty(
-                        browserConfig.header_name,
-                        "Professional Browser"
-                )
-        );
+        headerTitle.setText(nonEmpty(browserConfig.header_name, "Professional Browser"));
 
+        if (isAppExpired()) {
+            showError("This app access period has expired.");
+            return;
+        }
+
+        if (!browserConfig.proxy_feature_enabled) {
+            preferences.edit()
+                    .putBoolean("proxy_enabled", false)
+                    .putString("proxy_id", "")
+                    .putBoolean("proxy_initialized", true)
+                    .apply();
+            updateProxyButton();
+            clearProxySafely(() -> scheduleReload());
+            return;
+        }
+
+        if (!preferences.contains("proxy_initialized")) {
+            preferences.edit()
+                    .putBoolean("proxy_initialized", true)
+                    .putBoolean("proxy_enabled", browserConfig.default_proxy_enabled)
+                    .putString("proxy_id", nonEmpty(browserConfig.default_proxy_id, ""))
+                    .apply();
+        }
+
+        updateProxyButton();
         scheduleReload();
     }
 
@@ -362,9 +384,8 @@ public class MainActivity extends AppCompatActivity
     public void onProxiesChanged(
             List<ProxyServer> updatedProxies
     ) {
-        proxies = updatedProxies == null
-                ? new ArrayList<>()
-                : updatedProxies;
+        proxies = updatedProxies == null ? new ArrayList<>() : updatedProxies;
+        updateProxyButton();
     }
 
     @Override
@@ -404,13 +425,22 @@ public class MainActivity extends AppCompatActivity
                 .setMessage(nonEmpty(popup.description, ""))
                 .setNegativeButton("Close", (dialog, which) -> dialog.dismiss());
 
-        String buttonName = popup.button_name == null ? "" : popup.button_name.trim();
-        String buttonLink = popup.button_link == null ? "" : popup.button_link.trim();
+        String button1Name = nonEmpty(popup.button1_name, popup.button_name == null ? "" : popup.button_name).trim();
+        String button1Link = nonEmpty(popup.button1_link, popup.button_link == null ? "" : popup.button_link).trim();
+        String button2Name = popup.button2_name == null ? "" : popup.button2_name.trim();
+        String button2Link = popup.button2_link == null ? "" : popup.button2_link.trim();
 
-        if (!buttonName.isEmpty() && !buttonLink.isEmpty()) {
-            builder.setPositiveButton(buttonName, (dialog, which) -> {
+        if (!button1Name.isEmpty() && !button1Link.isEmpty()) {
+            builder.setPositiveButton(button1Name, (dialog, which) -> {
                 dialog.dismiss();
-                openPopupLink(buttonLink);
+                openPopupLink(button1Link);
+            });
+        }
+
+        if (!button2Name.isEmpty() && !button2Link.isEmpty()) {
+            builder.setNeutralButton(button2Name, (dialog, which) -> {
+                dialog.dismiss();
+                openPopupLink(button2Link);
             });
         }
 
@@ -460,6 +490,11 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void showProxyDialog() {
+        if (!browserConfig.proxy_feature_enabled) {
+            Toast.makeText(this, "Proxy controls are disabled by the administrator.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         List<String> items = new ArrayList<>();
 
         items.add("Proxy OFF");
@@ -560,6 +595,18 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void applySavedProxyThenLoad() {
+        if (isAppExpired()) {
+            showError("This app access period has expired.");
+            return;
+        }
+
+        if (!browserConfig.proxy_feature_enabled) {
+            preferences.edit().putBoolean("proxy_enabled", false).putString("proxy_id", "").apply();
+            updateProxyButton();
+            clearProxySafely(() -> { loadedUrl = ""; loadWebsite(true); });
+            return;
+        }
+
         boolean proxyEnabled =
                 preferences.getBoolean(
                         "proxy_enabled",
@@ -802,6 +849,11 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void loadWebsite(boolean force) {
+        if (isAppExpired()) {
+            showError("This app access period has expired.");
+            return;
+        }
+
         String websiteUrl = nonEmpty(
                 browserConfig.website_url,
                 "https://example.com"
@@ -829,21 +881,23 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void updateProxyButton() {
-        boolean proxyEnabled =
-                preferences.getBoolean(
-                        "proxy_enabled",
-                        false
-                );
+        boolean featureEnabled = browserConfig.proxy_feature_enabled;
+        boolean proxyEnabled = featureEnabled && preferences.getBoolean("proxy_enabled", false);
 
-        proxyButton.setText(
-                proxyEnabled ? "P✓" : "P"
-        );
+        proxyButton.setEnabled(featureEnabled);
+        proxyButton.setAlpha(featureEnabled ? 1.0f : 0.45f);
+        proxyButton.setText(proxyEnabled ? "P✓" : "P");
+        proxyButton.setContentDescription(featureEnabled
+                ? (proxyEnabled ? "Proxy enabled" : "Proxy disabled")
+                : "Proxy disabled by administrator");
+    }
 
-        proxyButton.setContentDescription(
-                proxyEnabled
-                        ? "Proxy enabled"
-                        : "Proxy disabled"
-        );
+
+    private boolean isAppExpired() {
+        return browserConfig != null
+                && browserConfig.app_expiry_enabled
+                && browserConfig.app_expires_at > 0
+                && (System.currentTimeMillis() / 1000L) >= browserConfig.app_expires_at;
     }
 
     private void showError(String message) {
