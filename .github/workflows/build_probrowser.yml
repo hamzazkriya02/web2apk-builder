@@ -55,7 +55,7 @@ jobs:
             -F "status=building" \
             -F "build_type=probrowser" \
             -F "message=Creating ProBrowser Android APK..." \
-            "${{ secrets.CPANEL_BASE_URL }}/api/probrowser-build-update.php"
+            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php"
 
       - name: Configure ProBrowser
         run: |
@@ -75,7 +75,7 @@ jobs:
             -F "status=ready" \
             -F "build_type=probrowser" \
             -F "apk=@probrowser/app/build/outputs/apk/debug/app-debug.apk;type=application/vnd.android.package-archive" \
-            "${{ secrets.CPANEL_BASE_URL }}/api/probrowser-build-update.php"
+            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php"
 
       - name: Notify cPanel - Failed
         if: failure()
@@ -87,4 +87,4 @@ jobs:
             -F "status=failed" \
             -F "build_type=probrowser" \
             -F "message=ProBrowser Android build failed." \
-            "${{ secrets.CPANEL_BASE_URL }}/api/probrowser-build-update.php" || true
+            "${{ secrets.PROBROWSER_BASE_URL }}/api/probrowser-build-update.php" || true
