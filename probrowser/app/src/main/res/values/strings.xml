@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ProBrowser</string>
+    <string name="proxy">P</string>
+    <string name="retry">Retry</string>
+</resources>
