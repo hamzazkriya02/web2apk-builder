@@ -36,9 +36,12 @@ jobs:
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "8.10.2"
+          gradle-version: "8.13"
+
+      - name: Verify Gradle
+        run: gradle --version
 
       - name: Install image processor
         run: python3 -m pip install --disable-pip-version-check --quiet pillow==11.3.0
