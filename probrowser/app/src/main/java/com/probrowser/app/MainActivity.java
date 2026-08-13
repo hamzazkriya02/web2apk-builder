@@ -12,9 +12,9 @@ import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.webkit.HttpAuthHandler;
 import android.webkit.WebViewClient;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -65,6 +65,9 @@ public class MainActivity extends AppCompatActivity
     private String scheduledPopupId = "";
     private String shownPopupId = "";
     private int proxyRetryCount = 0;
+    private boolean configLoaded = false;
+    private boolean proxiesLoaded = false;
+    private AuthenticatedProxyBridge proxyBridge;
 
     private final Runnable reloadRunnable = new Runnable() {
         @Override
@@ -95,9 +98,12 @@ public class MainActivity extends AppCompatActivity
          * Remove any old WebView proxy first.
          * This prevents an old invalid proxy from causing a blank screen.
          */
+        // Do not load any placeholder URL before Firebase returns the real app config.
+        // This permanently removes the old example.com flash/page.
+        progressBar.setVisibility(View.VISIBLE);
+        webView.setVisibility(View.INVISIBLE);
         clearProxySafely(() -> {
             loadedUrl = "";
-            loadWebsite(true);
             configureFirebase();
         });
 
@@ -111,14 +117,27 @@ public class MainActivity extends AppCompatActivity
             loadedUrl = "";
             webView.stopLoading();
             errorPanel.setVisibility(View.GONE);
-            webView.setVisibility(View.VISIBLE);
             progressBar.setVisibility(View.VISIBLE);
-            applySavedProxyThenLoad();
+            if (!configLoaded) {
+                webView.setVisibility(View.INVISIBLE);
+                configureFirebase();
+            } else {
+                webView.setVisibility(View.VISIBLE);
+                applySavedProxyThenLoad();
+            }
         });
 
-        findViewById(R.id.retryButton).setOnClickListener(
-                view -> applySavedProxyThenLoad()
-        );
+        findViewById(R.id.retryButton).setOnClickListener(view -> {
+            proxyRetryCount = 0;
+            errorPanel.setVisibility(View.GONE);
+            progressBar.setVisibility(View.VISIBLE);
+            if (!configLoaded) {
+                webView.setVisibility(View.INVISIBLE);
+                configureFirebase();
+            } else {
+                applySavedProxyThenLoad();
+            }
+        });
     }
 
     private void bindViews() {
@@ -248,38 +267,6 @@ public class MainActivity extends AppCompatActivity
                 new WebViewClient() {
 
                     @Override
-                    public void onReceivedHttpAuthRequest(
-                            WebView view,
-                            HttpAuthHandler handler,
-                            String host,
-                            String realm
-                    ) {
-                        String selectedProxyId =
-                                preferences.getString("proxy_id", "");
-
-                        ProxyServer selectedProxy =
-                                findProxy(selectedProxyId);
-
-                        if (selectedProxy != null
-                                && selectedProxy.username != null
-                                && !selectedProxy.username.trim().isEmpty()
-                                && selectedProxy.password != null
-                                && !selectedProxy.password.isEmpty()) {
-
-                            handler.proceed(
-                                    selectedProxy.username,
-                                    selectedProxy.password
-                            );
-                        } else {
-                            handler.cancel();
-
-                            showError(
-                                    "Proxy authentication credentials are missing."
-                            );
-                        }
-                    }
-
-                    @Override
                     public void onPageStarted(
                             WebView view,
                             String url,
@@ -314,17 +301,48 @@ public class MainActivity extends AppCompatActivity
                             WebResourceRequest request,
                             WebResourceError error
                     ) {
-                        if (request.isForMainFrame()) {
-                            String description = String.valueOf(error.getDescription());
-                            boolean proxyEnabled = preferences.getBoolean("proxy_enabled", false);
+                        if (!request.isForMainFrame()) return;
 
-                            if (browserConfig.proxy_feature_enabled && proxyEnabled && proxyRetryCount < 1) {
-                                proxyRetryCount++;
-                                reloadHandler.postDelayed(() -> applySavedProxyThenLoad(), 700);
-                                return;
-                            }
+                        int code = error.getErrorCode();
+                        boolean proxyEnabled = browserConfig.proxy_feature_enabled
+                                && preferences.getBoolean("proxy_enabled", false);
 
-                            showError("Website could not be loaded.\n" + description);
+                        if (proxyEnabled
+                                && code != WebViewClient.ERROR_PROXY_AUTHENTICATION
+                                && proxyRetryCount < 1) {
+                            proxyRetryCount++;
+                            webView.stopLoading();
+                            webView.setVisibility(View.INVISIBLE);
+                            progressBar.setVisibility(View.VISIBLE);
+                            reloadHandler.postDelayed(() -> applySavedProxyThenLoad(), 1200);
+                            return;
+                        }
+
+                        if (proxyEnabled && code == WebViewClient.ERROR_PROXY_AUTHENTICATION) {
+                            showError("Proxy login failed. Check the proxy username/password in Admin.");
+                        } else if (proxyEnabled && code == WebViewClient.ERROR_TIMEOUT) {
+                            showError("Proxy connection timed out. Tap Retry or choose another proxy.");
+                        } else if (proxyEnabled) {
+                            showError("Proxy could not load the website. Tap Retry or turn the proxy off.");
+                        } else {
+                            showError("Website could not be loaded. Please check the website or internet connection.");
+                        }
+                    }
+
+                    @Override
+                    public void onReceivedHttpError(
+                            WebView view,
+                            WebResourceRequest request,
+                            WebResourceResponse errorResponse
+                    ) {
+                        if (!request.isForMainFrame()) return;
+                        int status = errorResponse.getStatusCode();
+                        boolean proxyEnabled = browserConfig.proxy_feature_enabled
+                                && preferences.getBoolean("proxy_enabled", false);
+                        if (proxyEnabled && status == 407) {
+                            showError("Proxy authentication failed. Check username/password in Admin.");
+                        } else if (proxyEnabled && status >= 500) {
+                            showError("Proxy server is temporarily unavailable. Tap Retry.");
                         }
                     }
                 }
@@ -352,6 +370,14 @@ public class MainActivity extends AppCompatActivity
 
         headerTitle.setText(nonEmpty(browserConfig.header_name, "Professional Browser"));
 
+        String configuredUrl = browserConfig.website_url == null ? "" : browserConfig.website_url.trim();
+        if (configuredUrl.isEmpty()) {
+            configLoaded = false;
+            showError("Website URL is not configured for this app. Set it from Admin.");
+            return;
+        }
+        configLoaded = true;
+
         if (isAppExpired()) {
             showError("This app access period has expired.");
             return;
@@ -364,7 +390,7 @@ public class MainActivity extends AppCompatActivity
                     .putBoolean("proxy_initialized", true)
                     .apply();
             updateProxyButton();
-            clearProxySafely(() -> scheduleReload());
+            clearProxySafely(() -> loadWebsite(true));
             return;
         }
 
@@ -377,7 +403,15 @@ public class MainActivity extends AppCompatActivity
         }
 
         updateProxyButton();
-        scheduleReload();
+
+        // If a proxy is enabled, wait until its Firebase record is loaded before loading the site.
+        boolean wantsProxy = preferences.getBoolean("proxy_enabled", false);
+        if (!wantsProxy || proxiesLoaded) {
+            applySavedProxyThenLoad();
+        } else {
+            progressBar.setVisibility(View.VISIBLE);
+            webView.setVisibility(View.INVISIBLE);
+        }
     }
 
     @Override
@@ -385,7 +419,11 @@ public class MainActivity extends AppCompatActivity
             List<ProxyServer> updatedProxies
     ) {
         proxies = updatedProxies == null ? new ArrayList<>() : updatedProxies;
+        proxiesLoaded = true;
         updateProxyButton();
+        if (configLoaded) {
+            applySavedProxyThenLoad();
+        }
     }
 
     @Override
@@ -486,7 +524,9 @@ public class MainActivity extends AppCompatActivity
                 Toast.LENGTH_LONG
         ).show();
 
-        loadWebsite(true);
+        if (!configLoaded) {
+            showError("Could not load app settings. Check internet connection and tap Retry.");
+        }
     }
 
     private void showProxyDialog() {
@@ -627,21 +667,25 @@ public class MainActivity extends AppCompatActivity
          * remove the old WebView proxy completely,
          * then load the website normally.
          */
-        if (!proxyEnabled || !isValidProxy(selectedProxy)) {
-            preferences.edit()
-                    .putBoolean("proxy_enabled", false)
-                    .putString("proxy_id", "")
-                    .apply();
-
+        if (!proxyEnabled) {
             updateProxyButton();
-
             clearProxySafely(() -> {
                 loadedUrl = "";
                 webView.stopLoading();
-                webView.clearCache(true);
                 loadWebsite(true);
             });
+            return;
+        }
 
+        if (!proxiesLoaded) {
+            progressBar.setVisibility(View.VISIBLE);
+            webView.setVisibility(View.INVISIBLE);
+            return;
+        }
+
+        if (!isValidProxy(selectedProxy)) {
+            updateProxyButton();
+            showError("The selected proxy is unavailable or invalid. Choose another proxy or turn proxy OFF.");
             return;
         }
 
@@ -654,7 +698,6 @@ public class MainActivity extends AppCompatActivity
                 () -> {
                     loadedUrl = "";
                     webView.stopLoading();
-                    webView.clearCache(true);
                     loadWebsite(true);
                 }
         );
@@ -748,11 +791,28 @@ public class MainActivity extends AppCompatActivity
         }
 
         try {
+            stopProxyBridge();
+
+            String proxyRule;
+            String scheme = proxy.scheme == null ? "http" : proxy.scheme.trim().toLowerCase();
+
+            if (proxy.hasCredentials() && (scheme.equals("http") || scheme.equals("https"))) {
+                // Authenticated HTTP/HTTPS proxies need an explicit Proxy-Authorization header.
+                // WebView ProxyController has no username/password API, so route WebView through
+                // a loopback bridge that authenticates to the upstream proxy.
+                proxyBridge = new AuthenticatedProxyBridge(proxy);
+                int port = proxyBridge.start();
+                proxyRule = "http://127.0.0.1:" + port;
+            } else if (proxy.hasCredentials() && (scheme.equals("socks") || scheme.equals("socks5"))) {
+                showError("Authenticated SOCKS is not used by this build. In Admin use this proxy's HTTPS/HTTP port instead.");
+                return;
+            } else {
+                proxyRule = proxy.proxyRule();
+            }
+
             ProxyConfig proxyConfig =
                     new ProxyConfig.Builder()
-                            .addProxyRule(proxy.proxyRule())
-                            .addBypassRule("localhost")
-                            .addBypassRule("127.0.0.1")
+                            .addProxyRule(proxyRule)
                             .build();
 
             runProxyOperationWithTimeout(
@@ -785,6 +845,7 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void clearProxySafely(Runnable after) {
+        stopProxyBridge();
         if (!WebViewFeature.isFeatureSupported(
                 WebViewFeature.PROXY_OVERRIDE
         )) {
@@ -803,6 +864,16 @@ public class MainActivity extends AppCompatActivity
         );
     }
 
+    private void stopProxyBridge() {
+        if (proxyBridge != null) {
+            try {
+                proxyBridge.close();
+            } catch (Exception ignored) {
+            }
+            proxyBridge = null;
+        }
+    }
+
     private interface ProxyOperation {
         void run(Runnable callback);
     }
@@ -815,27 +886,33 @@ public class MainActivity extends AppCompatActivity
             ProxyOperation operation,
             Runnable after
     ) {
-        AtomicBoolean completed =
-                new AtomicBoolean(false);
+        AtomicBoolean completed = new AtomicBoolean(false);
+        Handler handler = new Handler(Looper.getMainLooper());
+        final Runnable[] timeoutHolder = new Runnable[1];
 
         Runnable finishOnce = () -> {
             if (completed.compareAndSet(false, true)) {
+                if (timeoutHolder[0] != null) {
+                    handler.removeCallbacks(timeoutHolder[0]);
+                }
+                // Wait for ProxyController's listener before any WebView load.
                 after.run();
+            }
+        };
+
+        timeoutHolder[0] = () -> {
+            if (completed.compareAndSet(false, true)) {
+                showError("Network proxy setup timed out. Tap Retry.");
             }
         };
 
         try {
             operation.run(finishOnce);
-
-            new Handler(
-                    Looper.getMainLooper()
-            ).postDelayed(
-                    finishOnce,
-                    2000
-            );
-
+            handler.postDelayed(timeoutHolder[0], 10000);
         } catch (Exception exception) {
-            finishOnce.run();
+            if (completed.compareAndSet(false, true)) {
+                showError("Network proxy setup failed. Tap Retry.");
+            }
         }
     }
 
@@ -854,10 +931,20 @@ public class MainActivity extends AppCompatActivity
             return;
         }
 
-        String websiteUrl = nonEmpty(
-                browserConfig.website_url,
-                "https://example.com"
-        ).trim();
+        if (!configLoaded) {
+            progressBar.setVisibility(View.VISIBLE);
+            webView.setVisibility(View.INVISIBLE);
+            return;
+        }
+
+        String websiteUrl = browserConfig.website_url == null
+                ? ""
+                : browserConfig.website_url.trim();
+
+        if (websiteUrl.isEmpty()) {
+            showError("Website URL is not configured for this app.");
+            return;
+        }
 
         if (!websiteUrl.startsWith("http://")
                 && !websiteUrl.startsWith("https://")) {
@@ -901,6 +988,11 @@ public class MainActivity extends AppCompatActivity
     }
 
     private void showError(String message) {
+        stopProxyBridge();
+
+        if (webView != null) {
+            webView.stopLoading();
+        }
         errorText.setText(message);
         errorPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
@@ -921,6 +1013,7 @@ public class MainActivity extends AppCompatActivity
     @Override
     protected void onDestroy() {
         reloadHandler.removeCallbacksAndMessages(null);
+        stopProxyBridge();
         popupHandler.removeCallbacksAndMessages(null);
 
         if (popupDialog != null && popupDialog.isShowing()) {
