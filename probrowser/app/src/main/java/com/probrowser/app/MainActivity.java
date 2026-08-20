@@ -2,13 +2,17 @@ package com.probrowser.app;
 
 
 import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.webkit.CookieManager;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -39,11 +43,14 @@ import com.probrowser.app.model.ProxyServer;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends AppCompatActivity
         implements FirebaseRepository.Listener {
+
+    private static final int FILE_CHOOSER_REQUEST_CODE = 4101;
 
     private TextView headerTitle;
     private MaterialButton proxyButton;
@@ -68,6 +75,7 @@ public class MainActivity extends AppCompatActivity
     private boolean configLoaded = false;
     private boolean proxiesLoaded = false;
     private AuthenticatedProxyBridge proxyBridge;
+    private ValueCallback<Uri[]> fileChooserCallback;
 
     private final Runnable reloadRunnable = new Runnable() {
         @Override
@@ -248,6 +256,38 @@ public class MainActivity extends AppCompatActivity
         webView.setWebChromeClient(
                 new WebChromeClient() {
                     @Override
+                    public boolean onShowFileChooser(
+                            WebView view,
+                            ValueCallback<Uri[]> filePathCallback,
+                            WebChromeClient.FileChooserParams fileChooserParams
+                    ) {
+                        if (fileChooserCallback != null) {
+                            fileChooserCallback.onReceiveValue(null);
+                        }
+                        fileChooserCallback = filePathCallback;
+
+                        Intent pickerIntent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        pickerIntent.addCategory(Intent.CATEGORY_OPENABLE);
+                        pickerIntent.setType("*/*");
+                        pickerIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+                                fileChooserParams.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+
+                        try {
+                            startActivityForResult(
+                                    Intent.createChooser(pickerIntent, "Select file"),
+                                    FILE_CHOOSER_REQUEST_CODE
+                            );
+                        } catch (ActivityNotFoundException exception) {
+                            fileChooserCallback.onReceiveValue(null);
+                            fileChooserCallback = null;
+                            Toast.makeText(MainActivity.this,
+                                    "No file picker is available on this device.",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                        return true;
+                    }
+
+                    @Override
                     public void onProgressChanged(
                             WebView view,
                             int newProgress
@@ -292,7 +332,7 @@ public class MainActivity extends AppCompatActivity
                             WebView view,
                             WebResourceRequest request
                     ) {
-                        return false;
+                        return openExternalLink(request.getUrl());
                     }
 
                     @Override
@@ -347,6 +387,62 @@ public class MainActivity extends AppCompatActivity
                     }
                 }
         );
+    }
+
+    /**
+     * Opens WhatsApp invitations/channels in WhatsApp instead of keeping them
+     * inside the WebView. Other non-web schemes (tel:, mailto:, intent:, etc.)
+     * are also handed to Android, while normal web links continue in the app.
+     */
+    private boolean openExternalLink(Uri uri) {
+        if (uri == null) return false;
+
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
+        boolean whatsappLink = scheme.equals("whatsapp")
+                || host.equals("wa.me")
+                || host.endsWith(".wa.me")
+                || host.equals("whatsapp.com")
+                || host.endsWith(".whatsapp.com");
+
+        if (whatsappLink) {
+            Intent whatsappIntent = new Intent(Intent.ACTION_VIEW, uri);
+            whatsappIntent.setPackage("com.whatsapp");
+            try {
+                startActivity(whatsappIntent);
+                return true;
+            } catch (ActivityNotFoundException ignored) {
+                // WhatsApp is not installed, or this link type is handled by a browser.
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    return true;
+                } catch (ActivityNotFoundException exception) {
+                    Toast.makeText(this, "No app is available to open this WhatsApp link.", Toast.LENGTH_LONG).show();
+                    return true;
+                }
+            }
+        }
+
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            } catch (ActivityNotFoundException exception) {
+                Toast.makeText(this, "No app is available to open this link.", Toast.LENGTH_LONG).show();
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != FILE_CHOOSER_REQUEST_CODE || fileChooserCallback == null) return;
+
+        Uri[] selectedFiles = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+        fileChooserCallback.onReceiveValue(selectedFiles);
+        fileChooserCallback = null;
     }
 
     private void configureBackButton() {
@@ -1015,6 +1111,11 @@ public class MainActivity extends AppCompatActivity
         reloadHandler.removeCallbacksAndMessages(null);
         stopProxyBridge();
         popupHandler.removeCallbacksAndMessages(null);
+
+        if (fileChooserCallback != null) {
+            fileChooserCallback.onReceiveValue(null);
+            fileChooserCallback = null;
+        }
 
         if (popupDialog != null && popupDialog.isShowing()) {
             popupDialog.dismiss();
